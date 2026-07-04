@@ -2286,13 +2286,22 @@ async function renderDash() {
 }
 
 // ═══ SOLUTIONS LIST (pure UI, unchanged logic) ════════════════
+// hashLine — stable content hash so a struck-through line stays matched to its
+// text even if the surrounding lines are added, removed, or reordered later.
+// (Two identical lines from the same source will share a key and toggle together.)
+function hashLine(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
 function renderSolutionsList(d, el) {
   const lines = [];
   const struck = d.solutions_struck || {};
 
   if (d.solutions && d.solutions.trim()) {
-    d.solutions.split('\n').forEach((l, i) => {
-      if (l.trim()) lines.push({ text: l.trim(), source: 'manual', key: 'manual_' + i });
+    d.solutions.split('\n').forEach(l => {
+      const t = l.trim();
+      if (t) lines.push({ text: t, source: 'manual', key: 'manual_' + hashLine(t) });
     });
   }
   Object.entries(SOLUTIONS_FEED).forEach(([stratId, promptIdxs]) => {
@@ -2301,8 +2310,9 @@ function renderSolutionsList(d, el) {
     promptIdxs.forEach(idx => {
       const ans = answers[idx];
       if (!ans || !ans.trim()) return;
-      ans.split('\n').forEach((l, li) => {
-        if (l.trim()) lines.push({ text: l.trim(), source: stratId, key: stratId + '_' + idx + '_' + li });
+      ans.split('\n').forEach(l => {
+        const t = l.trim();
+        if (t) lines.push({ text: t, source: stratId, key: stratId + '_' + idx + '_' + hashLine(t) });
       });
     });
   });
@@ -2326,10 +2336,18 @@ function renderSolutionsList(d, el) {
   html += '<p class="sol-hint">Click any solution to strike it through — struck items stay visible as part of your process.</p>';
   el.innerHTML = html;
 }
-async function toggleSolutionStruck(key) {
+// toggleSolutionStruck — queued so rapid clicks on different solutions run
+// one at a time; without this, two overlapping fetch-modify-write cycles
+// could silently drop one of the toggles.
+let struckToggleQueue = Promise.resolve();
+function toggleSolutionStruck(key) {
+  struckToggleQueue = struckToggleQueue.then(() => doToggleSolutionStruck(key));
+  return struckToggleQueue;
+}
+async function doToggleSolutionStruck(key) {
   const { data: d, error } = await db
     .from('decisions').select('solutions_struck').eq('id', currentDecisionId).single();
-  if (error || !d) return;
+  if (error || !d) { showToast('Could not update — please try again.'); console.error(error); return; }
 
   const struck = Object.assign({}, d.solutions_struck || {});
   if (struck[key]) {
@@ -2343,11 +2361,12 @@ async function toggleSolutionStruck(key) {
     .update({ solutions_struck: struck, updated_at: new Date().toISOString() })
     .eq('id', currentDecisionId);
 
-  if (updateErr) { console.error(updateErr); return; }
+  if (updateErr) { showToast('Could not update — please try again.'); console.error(updateErr); return; }
 
   // Re-fetch and re-render just the solutions panel
-  const { data: fresh } = await db
+  const { data: fresh, error: refetchErr } = await db
     .from('decisions').select('solutions, responses, solutions_struck').eq('id', currentDecisionId).single();
+  if (refetchErr) { console.error(refetchErr); return; }
   if (fresh) renderSolutionsList(fresh, document.getElementById('detail-solutions'));
 }
 // ═══ DECISION DETAIL ══════════════════════════════════════════
